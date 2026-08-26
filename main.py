@@ -1,0 +1,84 @@
+from fastapi import FastAPI, Depends
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from typing import Optional
+
+from database import SessionLocal, Transactions
+
+app = FastAPI(title="PLUTO")
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+class TransactionIOS(BaseModel):
+    value: float
+    establishment: Optional[str] = "Não informado"
+    date: Optional[str] = None
+    category_id: Optional[int] = None 
+    user_id: int
+
+CATEGORY_RULES = {
+    1 : ["ifood", "padaria", "mercado", "prezunic", "carrefour",
+          "assai", "assaí", "restaurante", "pizzaria", "churrascaria", 
+          "casafruti", "hortifruti", "petisqueira", "boteco"],
+    2 : ["uber", "99app", "posto", "autoposto", "ipiranga", 
+        "petrobras", "shell", "metrô", "metrorio", "CCR",
+        "99", "estacionamento", "estapar", "netpark"],
+    3 : ["cinema", "cinemas", "kinoplex", "ingresso", "Shopee"],
+    4 : ["principia", "drogaria", "drogarias", "venancio", "pacheco",
+         "raia", "ilha animal", "versatil", "wellhub"],
+    5 : ["spotify", "amazon prime", "apple", "microsoft", "dazn"],
+    6 : ["claro", "light", "naturgy", "aguas do rio", "mobilize"]
+}
+
+def expenses_classification(establishment: str) -> Optional[int]:
+    if not establishment:
+        return None
+
+    lower_name = establishment.lower()
+
+    for category_id, key_words in CATEGORY_RULES.items():
+        for item in key_words:
+            if item == "":
+                continue
+            if item in lower_name:
+                return category_id
+    return None
+
+
+
+@app.post("/webhook/iphone")
+def new_transaction(item:TransactionIOS, db: Session = Depends(get_db)):
+
+    final_category = item.category_id
+
+    if final_category is None and item.establishment != "Não informado":
+        final_category = expenses_classification(item.establishment)
+
+    new_transaction = Transactions(
+        value = item.value,
+        establishment = item.establishment,
+        category_id = final_category,
+        user_id = item.user_id 
+    )
+
+    db.add(new_transaction)
+    try:
+        db.commit()
+        db.refresh(new_transaction)
+    except Exception as e:
+        db.rollback()
+        return {"status": f"Erro interno no bando de dados. Detalhes: {e}"}
+    
+    return {
+        "status": "Sucess",
+        "message": "Transação registrada com sucesso.",
+        "id_banco": new_transaction.id,
+        "categoria_vinculada": new_transaction.category_id,
+        "usuario_id" : new_transaction.user_id
+    }
