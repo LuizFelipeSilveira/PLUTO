@@ -37,14 +37,14 @@ class Category(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
-    transactions = relationship("Transaction", back_populates="category")
+    transaction = relationship("Transactions", back_populates="category")
 
 class User(Base):
     __tablename__ = "user"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
-    transactions = relationship("Transaction", back_populates="user")
+    transaction = relationship("Transactions", back_populates="user")
 
 if __name__ == '__main__':
     try:
