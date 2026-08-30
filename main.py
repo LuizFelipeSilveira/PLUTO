@@ -59,7 +59,8 @@ def expenses_classification(establishment: str) -> Optional[int]:
 
 @app.post("/webhook/csv")
 def process_nubank_csv(payload:CSVPayload, db: Session = Depends(get_db)):
-    f = StringIO(payload.csv_data)
+    csv_text = payload.csv_data.lstrip('\ufeff')
+    f = StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=",")
 
     inserted_registries = 0
@@ -83,23 +84,26 @@ def process_nubank_csv(payload:CSVPayload, db: Session = Depends(get_db)):
             continue
 
         try:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             continue
 
-        existing_transaction = db.query(Transactions).filter(Transactions.date == date_obj,
+        existing_transaction = db.query(Transactions).filter(Transactions.date == date_str,
                                                              Transactions.establishment == title,
                                                              Transactions.value == value_val,
-                                                             Transactions.user_id, payload.user_id).first()
+                                                             Transactions.user_id == payload.user_id).first()
 
         if existing_transaction:
             uninserted_registries += 1
             continue
 
+        final_category = expenses_classification(title)
+
         new_transaction = Transactions(user_id=payload.user_id,
                                        value=value_val,
                                        establishment=title,
-                                       date=date_obj)
+                                       date=date_str,
+                                       category_id=final_category)
         db.add(new_transaction)
         inserted_registries += 1
 
