@@ -5,6 +5,7 @@ from typing import Optional
 from io import StringIO
 import csv
 from datetime import datetime
+from database import EstablishmentCategoryMap
 
 from database import SessionLocal, Transactions
 
@@ -32,16 +33,11 @@ def get_learned_category(establishment: str, db: Session) -> Optional[int]:
     if not establishment or establishment == "Não informado":
         return None
 
-    historico = db.query(Transactions.category_id)\
-                  .filter(Transactions.establishment == establishment,
-                          Transactions.category_id != None)\
-                  .order_by(Transactions.date.desc())\
-                  .first()
+    mapping = db.query(EstablishmentCategoryMap.category_id)\
+                .filter(EstablishmentCategoryMap.establishment == establishment)\
+                .first()
 
-    if historico:
-        return historico.category_id
-    
-    return None
+    return mapping.category_id if mapping else None
 
 
 @app.post("/webhook/csv")
