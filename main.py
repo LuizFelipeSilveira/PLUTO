@@ -28,37 +28,24 @@ class TransactionIOS(BaseModel):
     category_id: Optional[int] = None 
     user_id: int
 
-CATEGORY_RULES = {
-    1 : ["ifood", "padaria", "mercado", "prezunic", "carrefour",
-          "assai", "assaí", "restaurante", "pizzaria", "churrascaria", 
-          "casafruti", "hortifruti", "petisqueira", "boteco"],
-    2 : ["uber", "99app", "posto", "autoposto", "ipiranga", 
-        "petrobras", "shell", "metrô", "metrorio", "CCR",
-        "99", "estacionamento", "estapar", "netpark"],
-    3 : ["cinema", "cinemas", "kinoplex", "ingresso", "Shopee"],
-    4 : ["principia", "drogaria", "drogarias", "venancio", "pacheco",
-         "raia", "ilha animal", "versatil", "wellhub"],
-    5 : ["spotify", "amazon prime", "apple", "microsoft", "dazn"],
-    6 : ["claro", "light", "naturgy", "aguas do rio", "mobilize"]
-}
-
-
-def expenses_classification(establishment: str) -> Optional[int]:
-    if not establishment:
+def get_learned_category(establishment: str, db: Session) -> Optional[int]:
+    if not establishment or establishment == "Não informado":
         return None
 
-    lower_name = establishment.lower()
+    historico = db.query(Transactions.category_id)\
+                  .filter(Transactions.establishment == establishment,
+                          Transactions.category_id != None)\
+                  .order_by(Transactions.date.desc())\
+                  .first()
 
-    for category_id, key_words in CATEGORY_RULES.items():
-        for item in key_words:
-            if item == "":
-                continue
-            if item in lower_name:
-                return category_id
+    if historico:
+        return historico.category_id
+    
     return None
 
+
 @app.post("/webhook/csv")
-def process_nubank_csv(payload:CSVPayload, db: Session = Depends(get_db)):
+def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
     csv_text = payload.csv_data.lstrip('\ufeff')
     f = StringIO(csv_text)
     reader = csv.DictReader(f, delimiter=",")
@@ -88,22 +75,26 @@ def process_nubank_csv(payload:CSVPayload, db: Session = Depends(get_db)):
         except ValueError:
             continue
 
-        existing_transaction = db.query(Transactions).filter(Transactions.date == date_str,
-                                                             Transactions.establishment == title,
-                                                             Transactions.value == value_val,
-                                                             Transactions.user_id == payload.user_id).first()
+        existing_transaction = db.query(Transactions).filter(
+            Transactions.date == date_str,
+            Transactions.establishment == title,
+            Transactions.value == value_val,
+            Transactions.user_id == payload.user_id
+        ).first()
 
         if existing_transaction:
             uninserted_registries += 1
             continue
 
-        final_category = expenses_classification(title)
+        final_category = get_learned_category(title, db)
 
-        new_transaction = Transactions(user_id=payload.user_id,
-                                       value=value_val,
-                                       establishment=title,
-                                       date=date_str,
-                                       category_id=final_category)
+        new_transaction = Transactions(
+            user_id=payload.user_id,
+            value=value_val,
+            establishment=title,
+            date=date_str,
+            category_id=final_category
+        )
         db.add(new_transaction)
         inserted_registries += 1
 
@@ -120,18 +111,19 @@ def process_nubank_csv(payload:CSVPayload, db: Session = Depends(get_db)):
     }
 
 @app.post("/webhook/iphone")
-def new_transaction(item:TransactionIOS, db: Session = Depends(get_db)):
+def new_transaction(item: TransactionIOS, db: Session = Depends(get_db)):
 
     final_category = item.category_id
 
     if final_category is None and item.establishment != "Não informado":
-        final_category = expenses_classification(item.establishment)
+        final_category = get_learned_category(item.establishment, db)
 
     new_transaction = Transactions(
-        value = item.value,
-        establishment = item.establishment,
-        category_id = final_category,
-        user_id = item.user_id 
+        value=item.value,
+        establishment=item.establishment,
+        date=item.date, 
+        category_id=final_category,
+        user_id=item.user_id 
     )
 
     db.add(new_transaction)
@@ -147,5 +139,5 @@ def new_transaction(item:TransactionIOS, db: Session = Depends(get_db)):
         "message": "Transação registrada com sucesso.",
         "id_banco": new_transaction.id,
         "categoria_vinculada": new_transaction.category_id,
-        "usuario_id" : new_transaction.user_id
+        "usuario_id": new_transaction.user_id
     }
