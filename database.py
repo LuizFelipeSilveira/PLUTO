@@ -46,6 +46,14 @@ class User(Base):
     name = Column(String, nullable=False)
     transaction = relationship("Transactions", back_populates="user")
 
+class EstablishmentCategoryMap(Base):
+    __tablename__ = "establishment_category_map"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    establishment = Column(String, nullable=False, unique=True)
+    category_id = Column(Integer, ForeignKey("category.id"), nullable=False)
+    category = relationship("Category")
+
 if __name__ == '__main__':
     try:
         Base.metadata.create_all(engine)
