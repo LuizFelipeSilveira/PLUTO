@@ -34,7 +34,7 @@ try:
     category_names = {
         1: "Alimentação", 2: "Transporte", 3: "Lazer e Compras", 
         4: "Saúde e Bem-Estar", 5: "Assinaturas", 6: "Contas Residenciais",
-        7: "Outros", 8: "Renda"
+        7: "Outros", 8: "Renda", 9:"Investimento"
     }
     
     meses_pt = {
@@ -56,8 +56,12 @@ try:
     with tab_dashboard:
         st.header(f"{month_name}", divider=True)
 
-        income = 15000 
-        total_spent = df_month['value'].sum()
+        income = 15000
+        df_gastos = df_month[~df_month['category_id'].isin([8, 9])]
+        total_spent = df_gastos['value'].sum()
+
+        total_invested = df_month[df_month['category_id'] == 9]['value'].sum()
+
         balance = income - total_spent
 
         days_in_month = pd.Period(f'{year_now}-{month_now}').days_in_month
@@ -66,15 +70,15 @@ try:
         run_rate = (total_spent / current_day) * days_in_month if current_day > 0 else 0
         burn_rate = total_spent / current_day if current_day > 0 else 0
 
-        if not df_month.empty:
-            biggest_expense_row = df_month.loc[df_month['value'].idxmax()]
+        if not df_gastos.empty:
+            biggest_expense_row = df_gastos.loc[df_gastos['value'].idxmax()]
             biggest_name = biggest_expense_row['establishment']
             biggest_val = biggest_expense_row['value']
             biggest_expense_str = f"{biggest_name} (R$ {biggest_val:,.2f})".replace(",", "X").replace(".", ",").replace("X", ".")
         else:
             biggest_expense_str = "Nenhuma despesa"
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             income_str = f"{income:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -90,6 +94,10 @@ try:
                 st.metric(label="SALDO", value=f":green[+ {balance_str}]", border=True, icon=":material/payments:")
             else:
                 st.metric(label="SALDO", value=f":red[- {balance_str}]", border=True, icon=":material/payments:")
+
+        with col4:
+            invested_str = f"{total_invested:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            st.metric(label="INVESTIDO NO MÊS", value=f":blue[R$ {invested_str}]", border=True, icon=":material/savings:")
 
         col4, col5, col6 = st.columns(3)
         
