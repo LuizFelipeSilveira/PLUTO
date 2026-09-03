@@ -41,57 +41,93 @@ def get_learned_category(establishment: str, db: Session) -> Optional[int]:
 
     return mapping.category_id if mapping else None
 
+IGNORED_TRANSFER_NAMES = [
+    n.strip().lower() for n in os.getenv("IGNORED_TRANSFER_NAMES", "").split(",") if n.strip()
+]
+
+
+def should_ignore_transaction(descricao: str) -> bool:
+    texto = descricao.lower()
+    if texto.strip() == "pagamento de fatura":
+        return True
+    for nome in IGNORED_TRANSFER_NAMES:
+        if nome in texto:
+            return True
+    return False
+
+
+def extract_establishment(descricao: str) -> str:
+    partes = [p.strip() for p in descricao.split(" - ")]
+    texto = descricao.lower()
+
+    if "transferência enviada pelo pix" in texto or "transferência recebida pelo pix" in texto:
+        if len(partes) >= 2:
+            return partes[1]
+    elif "pagamento de boleto efetuado" in texto:
+        if len(partes) >= 2:
+            return partes[1]
+    elif "compra no débito" in texto:
+        if len(partes) >= 2:
+            return partes[1]
+
+    return descricao.strip()
 
 @app.post("/webhook/csv")
 def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
     csv_text = payload.csv_data.lstrip('\ufeff')
-    f = StringIO(csv_text)
-    reader = csv.DictReader(f, delimiter=",")
+
+    sample = "\n".join(csv_text.splitlines()[:5])
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.DictReader(StringIO(csv_text), dialect=dialect)
 
     inserted_registries = 0
     uninserted_registries = 0
 
     for row in reader:
-        date_str = row.get("date", "").strip()
-        title = row.get("title", "").strip()
-        value_str = row.get("amount", "").strip()
+        date_str = (row.get("Data") or "").strip()
+        value_str = (row.get("Valor") or "").strip()
+        identifier = (row.get("Identificador") or "").strip()
+        descricao = (row.get("Descrição") or "").strip()
 
-        if not date_str or not title or not value_str:
+        if should_ignore_transaction(descricao):
+            ignored_registries += 1
             continue
 
-        if "pagamento recebido" in title.lower():
+        if not date_str or not value_str or not identifier:
             continue
 
-        clean_value = value_str.replace(" ", "").replace(".", "").replace(",", ".")
         try:
-            value_val = float(clean_value)
+            value_val = abs(float(value_str))
         except ValueError:
             continue
 
         try:
-            datetime.strptime(date_str, "%Y-%m-%d")
+            date_val = datetime.strptime(date_str, "%d/%m/%Y")
         except ValueError:
             continue
 
         existing_transaction = db.query(Transactions).filter(
-            Transactions.date == date_str,
-            Transactions.establishment == title,
-            Transactions.value == value_val,
-            Transactions.user_id == payload.user_id
+            Transactions.external_id == identifier
         ).first()
 
         if existing_transaction:
             uninserted_registries += 1
             continue
 
-        final_category = get_learned_category(title, db)
+        establishment = extract_establishment(descricao)
+        final_category = get_learned_category(establishment, db)
 
         new_transaction = Transactions(
             user_id=payload.user_id,
             value=value_val,
-            establishment=title,
-            date=date_str,
-            category_id=final_category
+            establishment=establishment,
+            date=date_val,
+            category_id=final_category,
+            external_id=identifier,
         )
         db.add(new_transaction)
         inserted_registries += 1
@@ -105,7 +141,8 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
     return {
         "status": "sucess",
         "inserted": inserted_registries,
-        "skipped": uninserted_registries
+        "skipped": uninserted_registries,
+        "ignored": ignored_registries,
     }
 
 @app.post("/webhook/iphone")
