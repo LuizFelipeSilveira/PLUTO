@@ -99,17 +99,17 @@ try:
             invested_str = f"{total_invested:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             st.metric(label="INVESTIDO NO MÊS", value=f":blue[R$ {invested_str}]", border=True, icon=":material/savings:")
 
-        col4, col5, col6 = st.columns(3)
+        col5, col6, col7 = st.columns(3)
         
-        with col4:
+        with col5:
             run_rate_str = f"{run_rate:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             st.metric(label="PROJEÇÃO FINAL DO MÊS", value=f"R$ {run_rate_str}", border=True, icon=":material/event:")
             
-        with col5:
+        with col6:
             burn_rate_str = f"{burn_rate:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             st.metric(label="MÉDIA DE GASTO DIÁRIO", value=f"R$ {burn_rate_str}", border=True, icon=":material/today:")
             
-        with col6:
+        with col7:
             st.metric(label="MAIOR DESPESA", value=biggest_expense_str, border=True, icon=":material/warning:")
 
         st.markdown("<br>", unsafe_allow_html=True)
