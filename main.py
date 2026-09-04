@@ -86,6 +86,7 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
 
     inserted_registries = 0
     uninserted_registries = 0
+    ignored_registries = 0
 
     for row in reader:
         date_str = (row.get("Data") or "").strip()
