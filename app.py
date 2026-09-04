@@ -34,7 +34,7 @@ try:
     category_names = {
         1: "Alimentação", 2: "Transporte", 3: "Lazer e Compras", 
         4: "Saúde e Bem-Estar", 5: "Assinaturas", 6: "Contas Residenciais",
-        7: "Outros", 8: "Renda", 9:"Investimento"
+        7: "Outros", 8: "Renda", 9:"Investimento", 10:"Movimentação Interna"
     }
     
     meses_pt = {
@@ -51,17 +51,15 @@ try:
     month_name = meses_pt[month_now]
     df_month = df_transaction[(df_transaction["month"] == month_now) & (df_transaction["year"] == year_now)]
 
-    tab_dashboard, tab_treinamento = st.tabs(["Dashboard", "Treinamento"])
+    tab_dashboard, tab_treinamento, tab_mapa = st.tabs(["Dashboard", "Treinamento", "Mapeamentos"])
 
     with tab_dashboard:
         st.header(f"{month_name}", divider=True)
 
-        income = 15000
-        df_gastos = df_month[~df_month['category_id'].isin([8, 9])]
+        income = df_month[df_month['category_id'] == 8]['value'].sum()
+        df_gastos = df_month[~df_month['category_id'].isin([8, 9, 10])]
         total_spent = df_gastos['value'].sum()
-
         total_invested = df_month[df_month['category_id'] == 9]['value'].sum()
-
         balance = income - total_spent
 
         days_in_month = pd.Period(f'{year_now}-{month_now}').days_in_month
@@ -89,11 +87,12 @@ try:
             st.metric(label="TOTAL GASTO", value=f":red[R$ {total_spent_str}]", border=True, icon=":material/trending_down:")
 
         with col3:
-            balance_str = f"{balance:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            if balance > 0:
-                st.metric(label="SALDO", value=f":green[+ {balance_str}]", border=True, icon=":material/payments:")
+            if balance >= 0:
+                balance_str = f"{balance:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                st.metric(label="SALDO", value=f":green[+ R$ {balance_str}]", border=True, icon=":material/payments:")
             else:
-                st.metric(label="SALDO", value=f":red[- {balance_str}]", border=True, icon=":material/payments:")
+                balance_str = f"{abs(balance):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                st.metric(label="SALDO", value=f":red[- R$ {balance_str}]", border=True, icon=":material/payments:")
 
         with col4:
             invested_str = f"{total_invested:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -116,7 +115,7 @@ try:
 
         st.subheader("Evolução Diária de Gastos")
 
-        daily_expenses = df_month.groupby("day", as_index=False)["value"].sum()
+        daily_expenses = df_gastos.groupby("day", as_index=False)["value"].sum()
         all_days = pd.DataFrame({"day": range(1, days_in_month + 1)})
         
         daily_data = pd.merge(all_days, daily_expenses, on="day", how="left").fillna(0)
@@ -153,7 +152,7 @@ try:
 
         st.plotly_chart(fig_timeline, use_container_width=True)
 
-        categories_expenses = df_month.groupby("category_id", as_index=False)["value"].sum()
+        categories_expenses = df_gastos.groupby("category_id", as_index=False)["value"].sum()
         categories_expenses["category_name"] = categories_expenses["category_id"].map(category_names).fillna("Outros")
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -171,7 +170,7 @@ try:
         with col9:
             st.subheader("Gastos por categoria")
             category_data = categories_expenses.groupby("category_name", as_index=False)["value"].sum()
-            category_data["income_pct"] = (categories_expenses["value"]/income) * 100
+            category_data["income_pct"] = (category_data["value"] / income * 100) if income > 0 else 0
             category_data = category_data.rename(columns={
                 "category_name": "Categoria", "value": "Gasto", "income_pct": "Porcentagem da renda"
             })
@@ -189,7 +188,7 @@ try:
         past_dates_df["weekday"] = past_dates_df["date"].dt.dayofweek
 
         weekday_counts = past_dates_df.groupby("weekday").size().reset_index(name="counts")
-        df_month_copy = df_month.copy()
+        df_month_copy = df_gastos.copy()
         df_month_copy["weekday"] = df_month_copy["date"].dt.dayofweek
         weekday_expenses = df_month_copy.groupby("weekday", as_index=False)["value"].sum()
 
@@ -298,7 +297,46 @@ try:
                         st.success(f"{sucesso} estabelecimentos categorizados com sucesso!")
                         st.cache_data.clear()
                         st.rerun()
+    with tab_mapa:
+        st.header("Mapeamento de Estabelecimentos")
+        st.caption("Categoria aplicada automaticamente a cada estabelecimento conhecido.")
 
+        engine = init_connection()
+        df_mapa = pd.read_sql("SELECT establishment, category_id FROM establishment_category_map ORDER BY establishment", engine)
+
+        if df_mapa.empty:
+            st.info("Nenhum mapeamento cadastrado ainda.")
+        else:
+            df_mapa["categoria"] = df_mapa["category_id"].map(category_names)
+
+            with st.form("form_mapa"):
+                novas_categorias = {}
+                for _, row in df_mapa.iterrows():
+                    est = row["establishment"]
+                    atual = row["categoria"]
+                    opcoes = list(category_names.values())
+                    idx = opcoes.index(atual) if atual in opcoes else 0
+                    novas_categorias[est] = st.selectbox(est, options=opcoes, index=idx, key=f"map_{est}")
+
+                if st.form_submit_button("Salvar correções", type="primary"):
+                    nome_para_id = {v: k for k, v in category_names.items()}
+                    alterados = 0
+                    with engine.begin() as conn:
+                        for _, row in df_mapa.iterrows():
+                            est = row["establishment"]
+                            novo_id = nome_para_id[novas_categorias[est]]
+                            if novo_id != row["category_id"]:
+                                conn.execute(text(
+                                    "UPDATE establishment_category_map SET category_id = :c WHERE establishment = :e"
+                                ), {"c": novo_id, "e": est})
+                                alterados += 1
+                    if alterados > 0:
+                        st.success(f"{alterados} mapeamento(s) corrigido(s).")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.info("Nenhuma alteração detectada.")
+                        
 except Exception as e:
     st.error(f"Erro ao conectar com o banco de dados: {e}")
     st.info("Verifique se a DATABASE_URL foi inserida corretamente no código.")

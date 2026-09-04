@@ -41,10 +41,24 @@ def get_learned_category(establishment: str, db: Session) -> Optional[int]:
 
     return mapping.category_id if mapping else None
 
+OWN_TRANSFER_NAMES = [
+    n.strip().lower() for n in os.getenv("OWN_TRANSFER_NAMES", "").split(",") if n.strip()
+]
+
+def classify_income(descricao: str) -> int:
+    texto = descricao.lower()
+
+    if "resgate" in texto:
+        return 10 
+
+    for nome in OWN_TRANSFER_NAMES:
+        if nome in texto:
+            return 10  
+    return 8  
+
 IGNORED_TRANSFER_NAMES = [
     n.strip().lower() for n in os.getenv("IGNORED_TRANSFER_NAMES", "").split(",") if n.strip()
 ]
-
 
 def should_ignore_transaction(descricao: str) -> bool:
     texto = descricao.lower()
@@ -102,9 +116,12 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
             continue
 
         try:
-            value_val = abs(float(value_str))
+            raw_value = float(value_str)
         except ValueError:
             continue
+
+        value_val = abs(raw_value)
+        is_income = raw_value > 0
 
         try:
             date_val = datetime.strptime(date_str, "%d/%m/%Y")
@@ -120,7 +137,11 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
             continue
 
         establishment = extract_establishment(descricao)
-        final_category = get_learned_category(establishment, db)
+
+        if is_income:
+            final_category = classify_income(descricao)
+        else:
+            final_category = get_learned_category(establishment, db)
 
         new_transaction = Transactions(
             user_id=payload.user_id,
