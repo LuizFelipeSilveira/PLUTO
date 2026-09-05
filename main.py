@@ -228,7 +228,7 @@ def find_extrato_email(token: str):
         "$filter": "isRead eq false",
         "$orderby": "receivedDateTime desc",
         "$top": "10",
-        "$select": "id,subject,hasAttachments",
+        "$select": "id,subject,hasAttachments,toRecipients",
     }
     resp = requests.get(f"{GRAPH_BASE}/me/mailFolders/inbox/messages", headers=headers, params=params)
     resp.raise_for_status()
@@ -275,3 +275,28 @@ def check_extrato(authorization: str = Header(default="")):
         return {"status": "processado", "resultado": resp.json()}
 
     return {"status": "erro ao enviar csv", "detalhe": resp.text}
+
+@app.get("/cron/debug-emails")
+def debug_emails(authorization: str = Header(default="")):
+    if not CRON_SECRET or authorization != f"Bearer {CRON_SECRET}":
+        raise HTTPException(status_code=401, detail="Não autorizado")
+
+    token = get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "$filter": "isRead eq false",
+        "$orderby": "receivedDateTime desc",
+        "$top": "10",
+        "$select": "id,subject,hasAttachments,toRecipients",
+    }
+    resp = requests.get(f"{GRAPH_BASE}/me/mailFolders/inbox/messages", headers=headers, params=params)
+    resp.raise_for_status()
+
+    return [
+        {
+            "subject": m.get("subject"),
+            "hasAttachments": m.get("hasAttachments"),
+            "toRecipients": [r["emailAddress"]["address"] for r in m.get("toRecipients", [])],
+        }
+        for m in resp.json().get("value", [])
+    ]
