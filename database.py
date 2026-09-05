@@ -47,6 +47,8 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+    salary_bank = Column(String, nullable=True)
     transaction = relationship("Transactions", back_populates="user")
 
 class EstablishmentCategoryMap(Base):

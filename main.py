@@ -13,8 +13,19 @@ import requests
 import hashlib
 from collections import defaultdict
 import re
+from database import User
 
 app = FastAPI(title="PLUTO")
+
+MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
+MS_REFRESH_TOKEN = os.getenv("MS_REFRESH_TOKEN")
+CRON_SECRET = os.getenv("CRON_SECRET")
+
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+CSV_WEBHOOK_URL = "https://pluto-nine-lime.vercel.app/webhook/csv"
+FATURA_WEBHOOK_URL = "https://pluto-nine-lime.vercel.app/webhook/fatura"
 
 def get_db():
     db = SessionLocal()
@@ -56,20 +67,28 @@ def get_learned_category(establishment: str, db: Session) -> Optional[int]:
 
     return mapping.category_id if mapping else None
 
-OWN_TRANSFER_NAMES = [
-    n.strip().lower() for n in os.getenv("OWN_TRANSFER_NAMES", "").split(",") if n.strip()
-]
 
-def classify_income(descricao: str) -> int:
+def classify_income(descricao: str, user_id: int, db: Session) -> int:
     texto = descricao.lower()
 
-    if "resgate" in texto:
-        return 10 
+    eu = db.query(User).filter(User.id == user_id).first()
 
-    for nome in OWN_TRANSFER_NAMES:
-        if nome in texto:
-            return 10  
-    return 8  
+    if eu and eu.salary_bank and eu.full_name:
+        if eu.salary_bank.lower() in texto and eu.full_name.lower() in texto:
+            return 8
+
+    if "resgate" in texto:
+        return 10
+
+    outros = db.query(User).filter(User.id != user_id).all()
+    for outro in outros:
+        if outro.full_name and outro.full_name.lower() in texto:
+            return 10
+
+    if eu and eu.full_name and eu.full_name.lower() in texto:
+        return 10
+
+    return 8
 
 IGNORED_TRANSFER_NAMES = [
     n.strip().lower() for n in os.getenv("IGNORED_TRANSFER_NAMES", "").split(",") if n.strip()
@@ -79,9 +98,6 @@ def should_ignore_transaction(descricao: str) -> bool:
     texto = descricao.lower()
     if texto.strip() == "pagamento de fatura":
         return True
-    for nome in IGNORED_TRANSFER_NAMES:
-        if nome in texto:
-            return True
     return False
 
 
@@ -179,8 +195,6 @@ def process_nubank_fatura(payload: CSVPayload, db: Session = Depends(get_db)):
         return {"status": "error", "detail": str(e)}
 
     return {"status": "sucess", "inserted": inserted, "skipped": skipped, "ignored": ignored}
-
-FATURA_WEBHOOK_URL = "https://pluto-nine-lime.vercel.app/webhook/fatura"
 
 
 def find_all_documents(token: str):
@@ -304,7 +318,7 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
         establishment = extract_establishment(descricao)
 
         if is_income:
-            final_category = classify_income(descricao)
+            final_category = classify_income(descricao, user_id, db)
         else:
             final_category = get_learned_category(establishment, db)
 
@@ -331,15 +345,6 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
         "skipped": uninserted_registries,
         "ignored": ignored_registries,
     }
-
-MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
-MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
-MS_REFRESH_TOKEN = os.getenv("MS_REFRESH_TOKEN")
-CRON_SECRET = os.getenv("CRON_SECRET")
-
-GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-CSV_WEBHOOK_URL = "https://pluto-nine-lime.vercel.app/webhook/csv"
 
 
 def get_access_token() -> str:
