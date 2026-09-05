@@ -30,6 +30,8 @@ class Transactions(Base):
     date = Column(DateTime(timezone=True), default=get_current_time_utc)
     category_id = Column(Integer, ForeignKey("category.id"), nullable=True)
     external_id = Column(String, nullable=True, unique=True)
+    installment_current = Column(Integer, nullable=True)
+    installment_total = Column(Integer, nullable=True)
     category = relationship("Category", back_populates="transaction")
     user = relationship("User", back_populates="transaction")
 
