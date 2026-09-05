@@ -90,10 +90,6 @@ def classify_income(descricao: str, user_id: int, db: Session) -> int:
 
     return 8
 
-IGNORED_TRANSFER_NAMES = [
-    n.strip().lower() for n in os.getenv("IGNORED_TRANSFER_NAMES", "").split(",") if n.strip()
-]
-
 def should_ignore_transaction(descricao: str) -> bool:
     texto = descricao.lower()
     if texto.strip() == "pagamento de fatura":
