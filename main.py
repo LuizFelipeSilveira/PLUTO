@@ -10,6 +10,9 @@ from database import SessionLocal, Transactions
 import os
 import base64
 import requests
+import hashlib
+from collections import defaultdict
+import re
 
 app = FastAPI(title="PLUTO")
 
@@ -22,14 +25,26 @@ def get_db():
 
 class CSVPayload(BaseModel):
     csv_data: str
-    user_id: int
+    recipient: str
 
-class TransactionIOS(BaseModel):
-    value: float
-    establishment: Optional[str] = "Não informado"
-    date: Optional[str] = None
-    category_id: Optional[int] = None 
-    user_id: int
+
+USER_EMAIL_MAP = {}
+for par in os.getenv("USER_EMAIL_MAP", "").split(","):
+    if ":" in par:
+        email, uid = par.rsplit(":", 1)
+        USER_EMAIL_MAP[email.strip().lower()] = int(uid.strip())
+
+PARCELA_RE = re.compile(r"\s*-\s*Parcela\s+(\d+)/(\d+)\s*$", re.IGNORECASE)
+
+
+def split_parcela(title: str):
+    m = PARCELA_RE.search(title)
+    if m:
+        return PARCELA_RE.sub("", title).strip(), int(m.group(1)), int(m.group(2))
+    return title, None, None
+
+def resolve_user_id(recipient: str) -> Optional[int]:
+    return USER_EMAIL_MAP.get((recipient or "").strip().lower())
 
 def get_learned_category(establishment: str, db: Session) -> Optional[int]:
     if not establishment or establishment == "Não informado":
@@ -86,8 +101,158 @@ def extract_establishment(descricao: str) -> str:
 
     return descricao.strip()
 
+def parse_valor_br(valor: str) -> Optional[float]:
+    limpo = valor.replace(" ", "").replace(".", "").replace(",", ".")
+    try:
+        return float(limpo)
+    except ValueError:
+        return None
+
+
+@app.post("/webhook/fatura")
+def process_nubank_fatura(payload: CSVPayload, db: Session = Depends(get_db)):
+    user_id = resolve_user_id(payload.recipient)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail=f"Destinatário não mapeado: {payload.recipient}")
+
+    csv_text = payload.csv_data.lstrip('\ufeff')
+    reader = csv.DictReader(StringIO(csv_text))
+
+    inserted = 0
+    skipped = 0
+    ignored = 0
+    ocorrencias = defaultdict(int)
+
+    for row in reader:
+        date_str = (row.get("date") or "").strip()
+        title = (row.get("title") or "").strip()
+        amount_str = (row.get("amount") or "").strip()
+
+        if not date_str or not title or not amount_str:
+            continue
+
+        raw_value = parse_valor_br(amount_str)
+        if raw_value is None:
+            continue
+
+        # valor negativo na fatura = pagamento da própria fatura
+        if raw_value <= 0:
+            ignored += 1
+            continue
+
+        if should_ignore_transaction(title):
+            ignored += 1
+            continue
+
+        try:
+            date_val = datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            continue
+
+        chave = f"{date_str}|{title}|{amount_str}"
+        ocorrencias[chave] += 1
+        base = f"fatura|{user_id}|{chave}|{ocorrencias[chave]}"
+        external_id = hashlib.sha256(base.encode()).hexdigest()[:32]
+
+        if db.query(Transactions).filter(Transactions.external_id == external_id).first():
+            skipped += 1
+            continue
+
+        establishment, parcela_atual, parcela_total = split_parcela(title)
+
+        db.add(Transactions(
+            user_id=user_id,
+            value=raw_value,
+            establishment=establishment,
+            date=date_val,
+            category_id=get_learned_category(establishment, db),
+            external_id=external_id,
+            installment_current=parcela_atual,
+            installment_total=parcela_total,
+        ))
+        inserted += 1
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "detail": str(e)}
+
+    return {"status": "sucess", "inserted": inserted, "skipped": skipped, "ignored": ignored}
+
+FATURA_WEBHOOK_URL = "https://pluto-nine-lime.vercel.app/webhook/fatura"
+
+
+def find_all_documents(token: str):
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "$filter": "isRead eq false",
+        "$orderby": "receivedDateTime desc",
+        "$top": "25",
+        "$select": "id,subject,hasAttachments,toRecipients",
+    }
+    resp = requests.get(f"{GRAPH_BASE}/me/mailFolders/inbox/messages", headers=headers, params=params)
+    resp.raise_for_status()
+
+    encontrados = []
+    for msg in resp.json().get("value", []):
+        if not msg.get("hasAttachments"):
+            continue
+        assunto = (msg.get("subject") or "").lower()
+        if "fatura" in assunto:
+            tipo = "fatura"
+        elif "extrato" in assunto:
+            tipo = "extrato"
+        else:
+            continue
+        destinatarios = [r["emailAddress"]["address"] for r in msg.get("toRecipients", [])]
+        encontrados.append({
+            "id": msg["id"],
+            "tipo": tipo,
+            "recipient": destinatarios[0] if destinatarios else "",
+        })
+    return encontrados
+
+
+@app.get("/cron/check-extrato")
+def check_extrato(authorization: str = Header(default="")):
+    if not CRON_SECRET or authorization != f"Bearer {CRON_SECRET}":
+        raise HTTPException(status_code=401, detail="Não autorizado")
+
+    token = get_access_token()
+    documentos = find_all_documents(token)
+    if not documentos:
+        return {"status": "nenhum documento novo"}
+
+    resultados = []
+    for doc in documentos:
+        if resolve_user_id(doc["recipient"]) is None:
+            resultados.append({"tipo": doc["tipo"], "status": "destinatário não mapeado", "recipient": doc["recipient"]})
+            continue
+
+        csv_text = get_csv_attachment(token, doc["id"])
+        if not csv_text:
+            resultados.append({"tipo": doc["tipo"], "status": "sem CSV anexado"})
+            continue
+
+        url = CSV_WEBHOOK_URL if doc["tipo"] == "extrato" else FATURA_WEBHOOK_URL
+        resp = requests.post(url, json={"csv_data": csv_text, "recipient": doc["recipient"]})
+
+        if resp.status_code == 200:
+            mark_as_read(token, doc["id"])
+            resultados.append({"tipo": doc["tipo"], "status": "processado", "resultado": resp.json()})
+        else:
+            resultados.append({"tipo": doc["tipo"], "status": "erro", "detalhe": resp.text})
+
+    return {"status": "concluído", "documentos": resultados}
+
 @app.post("/webhook/csv")
 def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
+
+    user_id = resolve_user_id(payload.recipient)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail=f"Destinatário não mapeado: {payload.recipient}")
+
     csv_text = payload.csv_data.lstrip('\ufeff')
 
     sample = "\n".join(csv_text.splitlines()[:5])
@@ -144,7 +309,7 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
             final_category = get_learned_category(establishment, db)
 
         new_transaction = Transactions(
-            user_id=payload.user_id,
+            user_id=user_id,
             value=value_val,
             establishment=establishment,
             date=date_val,
@@ -167,42 +332,9 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
         "ignored": ignored_registries,
     }
 
-@app.post("/webhook/iphone")
-def new_transaction(item: TransactionIOS, db: Session = Depends(get_db)):
-
-    final_category = item.category_id
-
-    if final_category is None and item.establishment != "Não informado":
-        final_category = get_learned_category(item.establishment, db)
-
-    new_transaction = Transactions(
-        value=item.value,
-        establishment=item.establishment,
-        date=item.date, 
-        category_id=final_category,
-        user_id=item.user_id 
-    )
-
-    db.add(new_transaction)
-    try:
-        db.commit()
-        db.refresh(new_transaction)
-    except Exception as e:
-        db.rollback()
-        return {"status": f"Erro interno no bando de dados. Detalhes: {e}"}
-    
-    return {
-        "status": "Sucess",
-        "message": "Transação registrada com sucesso.",
-        "id_banco": new_transaction.id,
-        "categoria_vinculada": new_transaction.category_id,
-        "usuario_id": new_transaction.user_id
-    }
-
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
 MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 MS_REFRESH_TOKEN = os.getenv("MS_REFRESH_TOKEN")
-PLUTO_USER_ID = int(os.getenv("PLUTO_USER_ID", "1"))
 CRON_SECRET = os.getenv("CRON_SECRET")
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -222,22 +354,6 @@ def get_access_token() -> str:
     return resp.json()["access_token"]
 
 
-def find_extrato_email(token: str):
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "$filter": "isRead eq false",
-        "$orderby": "receivedDateTime desc",
-        "$top": "10",
-        "$select": "id,subject,hasAttachments,toRecipients",
-    }
-    resp = requests.get(f"{GRAPH_BASE}/me/mailFolders/inbox/messages", headers=headers, params=params)
-    resp.raise_for_status()
-    for msg in resp.json().get("value", []):
-        if msg.get("hasAttachments") and "extrato" in msg.get("subject", "").lower():
-            return msg
-    return None
-
-
 def get_csv_attachment(token: str, message_id: str):
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(f"{GRAPH_BASE}/me/messages/{message_id}/attachments", headers=headers)
@@ -254,49 +370,3 @@ def mark_as_read(token: str, message_id: str):
     requests.patch(f"{GRAPH_BASE}/me/messages/{message_id}", headers=headers, json={"isRead": True})
 
 
-@app.get("/cron/check-extrato")
-def check_extrato(authorization: str = Header(default="")):
-    if not CRON_SECRET or authorization != f"Bearer {CRON_SECRET}":
-        raise HTTPException(status_code=401, detail="Não autorizado")
-
-    token = get_access_token()
-    email = find_extrato_email(token)
-    if not email:
-        return {"status": "sem extrato novo"}
-
-    csv_text = get_csv_attachment(token, email["id"])
-    if not csv_text:
-        return {"status": "e-mail encontrado mas sem CSV anexado"}
-
-    resp = requests.post(CSV_WEBHOOK_URL, json={"csv_data": csv_text, "user_id": PLUTO_USER_ID})
-
-    if resp.status_code == 200:
-        mark_as_read(token, email["id"])
-        return {"status": "processado", "resultado": resp.json()}
-
-    return {"status": "erro ao enviar csv", "detalhe": resp.text}
-
-@app.get("/cron/debug-emails")
-def debug_emails(authorization: str = Header(default="")):
-    if not CRON_SECRET or authorization != f"Bearer {CRON_SECRET}":
-        raise HTTPException(status_code=401, detail="Não autorizado")
-
-    token = get_access_token()
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "$filter": "isRead eq false",
-        "$orderby": "receivedDateTime desc",
-        "$top": "10",
-        "$select": "id,subject,hasAttachments,toRecipients",
-    }
-    resp = requests.get(f"{GRAPH_BASE}/me/mailFolders/inbox/messages", headers=headers, params=params)
-    resp.raise_for_status()
-
-    return [
-        {
-            "subject": m.get("subject"),
-            "hasAttachments": m.get("hasAttachments"),
-            "toRecipients": [r["emailAddress"]["address"] for r in m.get("toRecipients", [])],
-        }
-        for m in resp.json().get("value", [])
-    ]
