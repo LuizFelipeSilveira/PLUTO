@@ -71,6 +71,9 @@ def get_learned_category(establishment: str, db: Session) -> Optional[int]:
 def classify_income(descricao: str, user_id: int, db: Session) -> int:
     texto = descricao.lower()
 
+    if "valor adicionado para pix no crédito" in texto:
+        return 10
+
     eu = db.query(User).filter(User.id == user_id).first()
 
     if eu and eu.salary_bank and eu.full_name:
@@ -101,7 +104,7 @@ def extract_establishment(descricao: str) -> str:
     partes = [p.strip() for p in descricao.split(" - ")]
     texto = descricao.lower()
 
-    if "transferência enviada pelo pix" in texto or "transferência recebida pelo pix" in texto:
+    if "transferência enviada" in texto or "transferência recebida" in texto:
         if len(partes) >= 2:
             return partes[1]
     elif "pagamento de boleto efetuado" in texto:
@@ -276,12 +279,17 @@ def process_nubank_csv(payload: CSVPayload, db: Session = Depends(get_db)):
     inserted_registries = 0
     uninserted_registries = 0
     ignored_registries = 0
+    ocorrencias_id = defaultdict(int)
 
     for row in reader:
         date_str = (row.get("Data") or "").strip()
         value_str = (row.get("Valor") or "").strip()
         identifier = (row.get("Identificador") or "").strip()
         descricao = (row.get("Descrição") or "").strip()
+
+        ocorrencias_id[identifier] += 1
+        if ocorrencias_id[identifier] > 1:
+            identifier = f"{identifier}|{ocorrencias_id[identifier]}"
 
         if should_ignore_transaction(descricao):
             ignored_registries += 1
