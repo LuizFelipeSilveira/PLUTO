@@ -7,14 +7,20 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import requests
 
 st.set_page_config(page_title="PLUTO", page_icon="🪐", layout="wide")
+
+def get_secret(nome: str):
+    try:
+        return st.secrets[nome]
+    except Exception:
+        return os.getenv(nome)
 
 @st.cache_resource
 def init_connection():
     load_dotenv()
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    return create_engine(DATABASE_URL)
+    return create_engine(get_secret("DATABASE_URL"))
 
 @st.cache_data(ttl=600)
 def load_data():
@@ -37,24 +43,10 @@ except Exception as e:
     st.error(f"Erro ao conectar com o banco de dados: {e}")
     st.stop()
 
-opcoes_user = ["Conjunto"] + df_users["name"].tolist()
-escolha_user = st.sidebar.radio("Visualizar", opcoes_user)
-
-if escolha_user != "Conjunto":
-    uid = int(df_users[df_users["name"] == escolha_user]["id"].iloc[0])
-    df_transaction = df_transaction[df_transaction["user_id"] == uid]
-
 today = datetime.date.today()
 month_now = today.month
 year_now = today.year
 
-category_names = {
-    1: "Alimentação", 2: "Transporte", 3: "Lazer e Compras", 
-    4: "Saúde e Bem-Estar", 5: "Assinaturas", 6: "Contas Residenciais",
-    7: "Outros", 8: "Renda", 9:"Investimento", 
-    10:"Movimentação Interna", 11:"Pet"
-}
-    
 meses_pt = {
     1: "JANEIRO", 2: "FEVEREIRO", 3: "MARÇO", 4: "ABRIL",
     5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
@@ -65,31 +57,101 @@ df_transaction["date"] = pd.to_datetime(df_transaction["date"])
 df_transaction["day"] = df_transaction["date"].dt.day
 df_transaction["month"] = df_transaction["date"].dt.month
 df_transaction["year"] = df_transaction["date"].dt.year
+
+category_names = {
+    1: "Alimentação", 2: "Transporte", 3: "Lazer", 
+    4: "Saúde e Bem-Estar", 5: "Assinaturas", 6: "Contas Residenciais",
+    7: "Outros", 8: "Renda", 9:"Investimento", 
+    10:"Movimentação Interna", 11:"Pet", 12:"Casa", 13:"Compras"
+}
+
+palette = px.colors.qualitative.Pastel
+color_map = {nome: palette[i % len(palette)] for i, nome in enumerate(category_names.values())}
     
-month_name = meses_pt[month_now]
-df_month = df_transaction[(df_transaction["month"] == month_now) & (df_transaction["year"] == year_now)]
 
 tab_dashboard, tab_treinamento, tab_mapa = st.tabs(["Dashboard", "Treinamento", "Mapeamentos"])
 
 with tab_dashboard:
-    st.header(f"{month_name}", divider=True)
+    col_user, col_month, col_cron = st.columns([2, 1, 1], vertical_alignment="bottom")
 
+    with col_user:
+        option_user = ["Conjunto"] + df_users["name"].tolist()
+        user_choice = st.pills("Visualizar", option_user, selection_mode="single", default="Conjunto")
+
+    df_filtered = df_transaction
+    if user_choice and user_choice != "Conjunto":
+        uid = int(df_users[df_users["name"] == user_choice]["id"].iloc[0])
+        df_filtered = df_transaction[df_transaction["user_id"] == uid]
+
+    available_months = (
+        df_filtered[["year", "month"]]
+        .drop_duplicates()
+        .sort_values(["year", "month"], ascending=False)
+    )
+
+    if available_months.empty:
+        st.info("Nenhuma transação encontrada para essa seleção.")
+        st.stop()
+
+    options_month = [(int(r["year"]), int(r["month"])) for _, r in available_months.iterrows()]
+    labels_month = [f"{meses_pt[m]} / {y}" for y, m in options_month]
+    idx_padrao = options_month.index((year_now, month_now)) if (year_now, month_now) in options_month else 0
+
+    with col_month:
+        chosen_label = st.selectbox("Mês", labels_month, index=idx_padrao)
+
+    with col_cron:
+        CRON_SECRET = get_secret("CRON_SECRET")
+        CRON_URL = "https://pluto-nine-lime.vercel.app/cron/check-extrato"
+
+        if st.button("Buscar novos documentos", icon=":material/refresh:", use_container_width=True):
+            if not CRON_SECRET:
+                st.error("CRON_SECRET não configurado.")
+            else:
+                with st.spinner("Consultando e-mails..."):
+                    try:
+                        resp = requests.get(CRON_URL, headers={"Authorization": f"Bearer {CRON_SECRET}"}, timeout=60)
+                        resultado = resp.json()
+                    except Exception as e:
+                        st.error(f"Erro ao consultar: {e}")
+                        resultado = None
+
+                if resultado:
+                    if resultado.get("status") == "nenhum documento novo":
+                        st.info("Nenhum extrato ou fatura novo encontrado.")
+                    else:
+                        for doc in resultado.get("documentos", []):
+                            if doc["status"] == "processado":
+                                r = doc["resultado"]
+                                st.success(f"{doc['tipo'].capitalize()}: {r.get('inserted', 0)} novas, {r.get('skipped', 0)} repetidas, {r.get('ignored', 0)} ignoradas.")
+                            else:
+                                st.warning(f"{doc['tipo'].capitalize()}: {doc['status']}")
+                        st.cache_data.clear()
+                        st.rerun()
+
+    year_sel, month_sel = options_month[labels_month.index(chosen_label)]
+    month_name = meses_pt[month_sel]
+    df_month = df_filtered[(df_filtered["month"] == month_sel) & (df_filtered["year"] == year_sel)]
+
+    st.space("medium")
+
+    st.header(f"{month_name} - {year_sel}", divider=True)
+
+    CATEGORIAS_FIXAS = [5, 6]  # Assinaturas, Contas Residenciais
+
+    df_expenses = df_month[~df_month['category_id'].isin([8, 9, 10])]
+    df_variable = df_expenses[~df_expenses['category_id'].isin(CATEGORIAS_FIXAS)]
+    total_fixo = df_expenses[df_expenses['category_id'].isin(CATEGORIAS_FIXAS)]['value'].sum()
     income = df_month[df_month['category_id'] == 8]['value'].sum()
-    df_gastos = df_month[~df_month['category_id'].isin([8, 9, 10])]
-    total_spent = df_gastos['value'].sum()
+    total_spent = df_expenses['value'].sum()
     total_invested = df_month[df_month['category_id'] == 9]['value'].sum()
     balance = income - total_spent
 
-    days_in_month = pd.Period(f'{year_now}-{month_now}').days_in_month
-    current_day = today.day if (month_now == today.month and year_now == today.year) else days_in_month
+    days_in_month = pd.Period(f'{year_sel}-{month_sel}').days_in_month
+    current_day = today.day if (month_sel == today.month and year_sel == today.year) else days_in_month
         
     run_rate = (total_spent / current_day) * days_in_month if current_day > 0 else 0
     burn_rate = total_spent / current_day if current_day > 0 else 0
-
-    if not df_gastos.empty:
-        biggest_expense_row = df_gastos.loc[df_gastos['value'].idxmax()]
-        biggest_name = biggest_expense_row['establishment']
-        biggest_val = biggest_expense_row['value']
 
     col1, col2, col3, col4 = st.columns(4)
     
@@ -113,7 +175,7 @@ with tab_dashboard:
         invested_str = f"{total_invested:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         st.metric(label="INVESTIDO NO MÊS", value=f":blue[R$ {invested_str}]", border=True, icon=":material/savings:")
 
-    col5, col6, col7 = st.columns(3)
+    col5, col6, col7, col_fixo = st.columns(4)
     
     with col5:
         run_rate_str = f"{run_rate:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -134,29 +196,44 @@ with tab_dashboard:
         parcelas_str = f"{parcelas_futuras:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         st.metric(label="COMPROMETIDO EM PARCELAS", value=f"R$ {parcelas_str}", border=True, icon=":material/schedule:")
 
+    with col_fixo:
+        fixo_str = f"{total_fixo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        st.metric(label="GASTOS FIXOS", value=f"R$ {fixo_str}", border=True, icon=":material/home:")
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     st.subheader("Evolução Diária de Gastos")
 
-    daily_expenses = df_gastos.groupby("day", as_index=False)["value"].sum()
-    all_days = pd.DataFrame({"day": range(1, days_in_month + 1)})
-    
-    daily_data = pd.merge(all_days, daily_expenses, on="day", how="left").fillna(0)
-    daily_data["acumulado"] = daily_data["value"].cumsum()
+    df_expenses = df_expenses.copy()
+    df_expenses["category_name"] = df_expenses["category_id"].map(category_names).fillna("Outros")
 
-    if month_now == today.month and year_now == today.year:
+    daily_pivot = df_expenses.pivot_table(
+        index="day", columns="category_name", values="value", aggfunc="sum"
+    ).reindex(range(1, days_in_month + 1)).fillna(0)
+
+    categorias_presentes = list(daily_pivot.columns)
+    daily_data = daily_pivot.reset_index()
+    daily_data["total"] = daily_data[categorias_presentes].sum(axis=1)
+    daily_data["acumulado"] = daily_data["total"].cumsum()
+
+    if month_sel == today.month and year_sel == today.year:
         daily_data.loc[daily_data["day"] > today.day, "acumulado"] = None
 
     fig_timeline = make_subplots(specs=[[{"secondary_y": True}]])
 
-    fig_timeline.add_trace(
-        go.Bar(x=daily_data["day"], y=daily_data["value"], name="Gasto Diário", marker_color="#3b82f6"),
-        secondary_y=False
-    )
+    for nome in category_names.values():
+        if nome in categorias_presentes:
+            fig_timeline.add_trace(
+                go.Bar(
+                    x=daily_data["day"], y=daily_data[nome],
+                    name=nome, marker_color=color_map[nome]
+                ),
+                secondary_y=False
+            )
 
     fig_timeline.add_trace(
         go.Scatter(
-            x=daily_data["day"], y=daily_data["acumulado"], name="Acumulado", 
+            x=daily_data["day"], y=daily_data["acumulado"], name="Acumulado",
             mode="lines+markers", line=dict(color="rgba(239, 68, 68, 0.5)", width=3),
             marker=dict(color="rgba(239, 68, 68, 0.5)")
         ),
@@ -167,7 +244,8 @@ with tab_dashboard:
         xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.5, days_in_month + 0.5]),
         margin=dict(t=20, b=20, l=20, r=20),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        barmode="stack"
     )
 
     fig_timeline.update_yaxes(title_text="Gasto Diário (R$)", tickprefix="R$ ", secondary_y=False)
@@ -175,7 +253,7 @@ with tab_dashboard:
 
     st.plotly_chart(fig_timeline, use_container_width=True)
 
-    categories_expenses = df_gastos.groupby("category_id", as_index=False)["value"].sum()
+    categories_expenses = df_expenses.groupby("category_id", as_index=False)["value"].sum()
     categories_expenses["category_name"] = categories_expenses["category_id"].map(category_names).fillna("Outros")
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -184,8 +262,8 @@ with tab_dashboard:
 
     with col8:
         fig_pie = px.pie(
-            categories_expenses, values="value", names="category_name", 
-            hole=0.5, color_discrete_sequence=px.colors.qualitative.Pastel
+            categories_expenses, values="value", names="category_name",
+            hole=0.5, color="category_name", color_discrete_map=color_map
         )
         fig_pie.update_layout(showlegend=True, margin=dict(t=20, b=20, l=20, r=20))
         st.plotly_chart(fig_pie, use_container_width=True)
@@ -203,15 +281,16 @@ with tab_dashboard:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    st.subheader("Comportamento: Média de Gastos por Dia da Semana")
-    limit_day = today.day if (month_now == today.month and year_now == today.year) else days_in_month
+    st.subheader("Média de Gastos por Dia da Semana")
+    st.caption("Não considera gastos fixos (Contas da casa e assinaturas)")
+    limit_day = today.day if (month_sel == today.month and year_sel == today.year) else days_in_month
     
-    past_dates = pd.date_range(start=f"{year_now}-{month_now}-01", periods=limit_day)
+    past_dates = pd.date_range(start=f"{year_sel}-{month_sel}-01", periods=limit_day)
     past_dates_df = pd.DataFrame({"date": past_dates})
     past_dates_df["weekday"] = past_dates_df["date"].dt.dayofweek
 
     weekday_counts = past_dates_df.groupby("weekday").size().reset_index(name="counts")
-    df_month_copy = df_gastos.copy()
+    df_month_copy = df_variable.copy()
     df_month_copy["weekday"] = df_month_copy["date"].dt.dayofweek
     weekday_expenses = df_month_copy.groupby("weekday", as_index=False)["value"].sum()
 
